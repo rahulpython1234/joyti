@@ -1,10 +1,11 @@
 import ephem
 import math
+import json
 from datetime import datetime, timezone
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from anthropic import Anthropic
+import google.generativeai as genai
 from supabase import create_client, Client
 from dotenv import load_dotenv
 import os
@@ -21,10 +22,12 @@ app.add_middleware(
 )
 
 # ── Clients ──────────────────────────────────────────────────────────────────
-anthropic_client = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+# Configure Gemini instead of Anthropic
+genai.configure(api_key=os.environ["GEMINI_API_KEY"])
+
 supabase: Client = create_client(
     os.environ["SUPABASE_URL"],
-    os.environ["SUPABASE_SERVICE_KEY"]   # use service key server-side only
+    os.environ["SUPABASE_SERVICE_KEY"]   
 )
 
 # ── Jain reference data ───────────────────────────────────────────────────────
@@ -42,7 +45,6 @@ TITHI_NAMES = [
     "Trayodashi","Chaturdashi","Purnima/Amavasya"
 ]
 
-# Jain fasting/dietary rules keyed by tithi number (1-30)
 TITHI_DHARMA = {
     8:  {"fast": "Ashtami Upavasa (full fast recommended)", "diet": "Complete abstinence from root vegetables and meat."},
     14: {"fast": "Chaturdashi Upavasa (Paksha fast)", "diet": "Strict Jain diet; avoid multi-sense organism foods."},
@@ -63,17 +65,14 @@ def calculate_jain_positions(lat: float, lon: float, dt: datetime) -> dict:
     moon_lon = math.degrees(float(moon.hlong)) % 360
     sun_lon  = math.degrees(float(sun.hlong))  % 360
 
-    # Tithi: every 12° difference = 1 tithi
     diff  = (moon_lon - sun_lon) % 360
-    tithi_index = int(diff / 12) + 1          # 1-30
+    tithi_index = int(diff / 12) + 1          
     tithi_name  = TITHI_NAMES[min(tithi_index - 1, 14)]
     paksha      = "Shukla (Bright)" if tithi_index <= 15 else "Krishna (Dark)"
 
-    # Nakshatra: moon traverses 27 nakshatras in 360°
     nakshatra_index = int(moon_lon / (360 / 27))
     nakshatra_name  = NAKSHATRA_NAMES[nakshatra_index % 27]
 
-    # Moon phase percentage
     moon.compute(observer)
     phase_pct = round(moon.phase, 2)
 
@@ -141,43 +140,38 @@ personalised daily spiritual reading. Respond in {language}.
 Return ONLY the JSON object specified — no preamble, no markdown.
 """
 
-# ── Request / Response models ─────────────────────────────────────────────────
 class HoroscopeRequest(BaseModel):
     user_id:   str
     latitude:  float
     longitude: float
-    language:  str = "English"   # English | Hindi | Gujarati
+    language:  str = "English"   
 
 class HoroscopeResponse(BaseModel):
     astro_data:    dict
     reading:       dict
     generated_at:  str
 
-# ── Main endpoint ─────────────────────────────────────────────────────────────
 @app.post("/generate-horoscope", response_model=HoroscopeResponse)
 async def generate_horoscope(req: HoroscopeRequest):
     now = datetime.now(timezone.utc)
 
-    # 1. Astronomical calculation
     try:
         astro = calculate_jain_positions(req.latitude, req.longitude, now)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Astro calculation error: {e}")
 
-    # 2. Claude API call
+    # Initialize Gemini model
     try:
-        response = anthropic_client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=1200,
-            system=JAIN_SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": build_user_prompt(astro, req.language)}]
+        model = genai.GenerativeModel(
+            model_name="gemini-1.5-flash",
+            system_instruction=JAIN_SYSTEM_PROMPT,
+            generation_config={"response_mime_type": "application/json"}
         )
-        import json
-        reading = json.loads(response.content[0].text)
+        response = model.generate_content(build_user_prompt(astro, req.language))
+        reading = json.loads(response.text)
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"AI generation error: {e}")
+        raise HTTPException(status_code=502, detail=f"Gemini API error: {e}")
 
-    # 3. Save to Supabase
     try:
         supabase.table("horoscope_history").insert({
             "user_id":      req.user_id,
@@ -188,7 +182,7 @@ async def generate_horoscope(req: HoroscopeRequest):
             "generated_at": now.isoformat(),
         }).execute()
     except Exception as e:
-        print(f"Supabase save warning: {e}")  # non-fatal
+        print(f"Supabase save warning: {e}") 
 
     return HoroscopeResponse(
         astro_data=astro,
@@ -198,4 +192,4 @@ async def generate_horoscope(req: HoroscopeRequest):
 
 @app.get("/health")
 def health():
-    return {"status": "om", "service": "Jain Jyotish API"}
+    return {"status": "om", "service": "Jain Jyotish API (Powered by Gemini)"}
