@@ -163,7 +163,7 @@ async def generate_horoscope(req: HoroscopeRequest):
     # Initialize Gemini model
     try:
         model = genai.GenerativeModel(
-            model_name="gemini-1.5-flash",
+            model = genai.GenerativeModel('gemini-2.0-flash') 
             system_instruction=JAIN_SYSTEM_PROMPT,
             generation_config={"response_mime_type": "application/json"}
         )
