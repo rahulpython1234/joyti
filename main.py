@@ -160,10 +160,10 @@ async def generate_horoscope(req: HoroscopeRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Astro calculation error: {e}")
 
-    # Initialize Gemini model
+    # Initialize Gemini model# Initialize Gemini model
     try:
         model = genai.GenerativeModel(
-            model = genai.GenerativeModel('gemini-2.0-flash') 
+            model_name='gemini-2.0-flash',
             system_instruction=JAIN_SYSTEM_PROMPT,
             generation_config={"response_mime_type": "application/json"}
         )
