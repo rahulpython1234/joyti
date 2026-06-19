@@ -8,6 +8,7 @@ from pydantic import BaseModel
 from supabase import create_client, Client
 from dotenv import load_dotenv
 import os
+from content_pipeline import PENDING_CONTENT
 
 load_dotenv()
 
@@ -1442,6 +1443,138 @@ def generate_deterministic_reading(astro: dict, language: str) -> dict:
         }
 
 
+# ── Daily visual generation ───────────────────────────────────────────────────
+# Deterministic SVG illustration keyed to Leshya (background) + Tithi parity
+# (lotus for odd tithi, dharma chakra for even) + Shreni meter (lit petals/spokes).
+# No external calls. Pure string construction using stdlib math only.
+
+def generate_daily_visual(astro: dict, shreni: int) -> dict:
+    LESHYA_BG = {
+        "Krishna": "#1a1a1a",
+        "Nila":    "#1e3a5f",
+        "Kapota":  "#4a4a4a",
+        "Pita":    "#d4af37",
+        "Padma":   "#c2185b",
+        "Shukla":  "#fafafa",
+    }
+    LESHYA_GLOW = {
+        "Krishna": "#D4AF37",
+        "Nila":    "#7BA7E8",
+        "Kapota":  "#D4AF37",
+        "Pita":    "#1A1A2E",
+        "Padma":   "#FFD700",
+        "Shukla":  "#1A1A2E",
+    }
+    LESHYA_COLOR_NAMES = {
+        "Krishna": "obsidian-black",
+        "Nila":    "deep-indigo",
+        "Kapota":  "slate-grey",
+        "Pita":    "golden-amber",
+        "Padma":   "lotus-crimson",
+        "Shukla":  "pure-white",
+    }
+
+    nakshatra_name  = astro.get("nakshatra", "Ashvini")
+    nak             = NAKSHATRA_DATA.get(nakshatra_name, NAKSHATRA_DATA["Ashvini"])
+    dominant_leshya = nak["leshya"]
+    tithi_number    = int(astro.get("tithi_number", 1))
+    paksha          = astro.get("paksha", "Shukla (Bright)")
+
+    bg_color    = LESHYA_BG.get(dominant_leshya, "#1a1a1a")
+    glow_color  = LESHYA_GLOW.get(dominant_leshya, "#D4AF37")
+    color_name  = LESHYA_COLOR_NAMES.get(dominant_leshya, "dark")
+    dim_color   = "#444444"
+
+    is_lotus    = (tithi_number % 2 == 1)   # odd tithi → lotus, even → chakra
+    shreni      = max(1, min(shreni, 10))    # clamp 1–10
+
+    shapes_svg  = ""
+
+    if is_lotus:
+        # 8-petal lotus. Each petal: ellipse at (100, 62), rotated i*45° around (100,100).
+        total_count = 8
+        lit_count   = min(shreni, total_count)
+        shape_type  = "lotus"
+        petal_word  = "petals"
+
+        for i in range(8):
+            angle   = i * 45
+            fill    = glow_color if i < lit_count else dim_color
+            opacity = "1.0" if i < lit_count else "0.25"
+            shapes_svg += (
+                f'<ellipse cx="100" cy="62" rx="11" ry="24" '
+                f'fill="{fill}" opacity="{opacity}" '
+                f'transform="rotate({angle}, 100, 100)"/>\n'
+            )
+        # Center circles: outer glow ring → bg void → inner dot
+        shapes_svg += f'<circle cx="100" cy="100" r="20" fill="{glow_color}" opacity="0.9"/>\n'
+        shapes_svg += f'<circle cx="100" cy="100" r="13" fill="{bg_color}"/>\n'
+        shapes_svg += f'<circle cx="100" cy="100" r="6"  fill="{glow_color}" opacity="0.8"/>\n'
+    else:
+        # 24-spoke dharma chakra. Spoke i at angle i*15° from top.
+        total_count = 24
+        lit_count   = min(shreni, total_count)
+        shape_type  = "dharma chakra"
+        petal_word  = "spokes"
+
+        # Outer rim guide
+        shapes_svg += (
+            f'<circle cx="100" cy="100" r="76" fill="none" '
+            f'stroke="{glow_color}" stroke-width="1" opacity="0.25"/>\n'
+        )
+        for i in range(24):
+            angle_rad = math.radians(i * 15)
+            x2 = 100 + 72 * math.sin(angle_rad)
+            y2 = 100 - 72 * math.cos(angle_rad)
+            stroke  = glow_color if i < lit_count else dim_color
+            opacity = "1.0" if i < lit_count else "0.18"
+            width   = "2.5" if i < lit_count else "1"
+            shapes_svg += (
+                f'<line x1="100" y1="100" x2="{x2:.2f}" y2="{y2:.2f}" '
+                f'stroke="{stroke}" stroke-width="{width}" opacity="{opacity}"/>\n'
+            )
+        # Hub
+        shapes_svg += f'<circle cx="100" cy="100" r="12" fill="{glow_color}" opacity="0.9"/>\n'
+        shapes_svg += f'<circle cx="100" cy="100" r="6"  fill="{bg_color}"/>\n'
+
+    energy_direction = "ascending" if "Shukla" in paksha else "inward"
+
+    caption = (
+        f"Today's {dominant_leshya} Leshya is shown as the {color_name} field. "
+        f"{lit_count} of {total_count} {petal_word} glow — representing today's "
+        f"Shreni intensity of {shreni}/10. The {shape_type} shape reflects "
+        f"{paksha}'s {energy_direction} movement."
+    )
+
+    svg_code = (
+        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" '
+        f'width="200" height="200">\n'
+        f'<rect width="200" height="200" fill="{bg_color}" rx="100"/>\n'
+        f'{shapes_svg}'
+        f'</svg>'
+    )
+
+    return {"svg_code": svg_code, "caption": caption}
+
+
+# ── Verified verse loader ──────────────────────────────────────────────────────
+# Merges verified_verses.json (human-reviewed additions) into VERSE_LIBRARY at
+# startup. Missing file is silently ignored — the hardcoded library is complete.
+def load_verified_verses() -> None:
+    try:
+        with open("verified_verses.json", encoding="utf-8") as f:
+            extra: dict = json.load(f)
+        if extra:
+            VERSE_LIBRARY.update(extra)
+            print(f"[startup] Loaded {len(extra)} verified verse(s) from verified_verses.json")
+    except FileNotFoundError:
+        pass  # Normal on first deploy before any verses are approved
+    except Exception as e:
+        print(f"[startup] Warning: could not load verified_verses.json — {e}")
+
+load_verified_verses()
+
+
 # ── Request / Response models ─────────────────────────────────────────────────
 class HoroscopeRequest(BaseModel):
     user_id:   str
@@ -1453,6 +1586,7 @@ class HoroscopeRequest(BaseModel):
 class HoroscopeResponse(BaseModel):
     astro_data:   dict
     reading:      dict
+    daily_visual: dict   # {"svg_code": str, "caption": str}
     generated_at: str
 
 
@@ -1490,7 +1624,13 @@ async def generate_horoscope(req: HoroscopeRequest):
                 detail=f"Reading engine error: {str(e)}",
             )
 
-    # 3. Save to Supabase (non-fatal)
+    # 3. Daily visual
+    try:
+        daily_visual = generate_daily_visual(astro, reading.get("shreni_meter", 5))
+    except Exception as e:
+        daily_visual = {"svg_code": "", "caption": f"Visual unavailable: {e}"}
+
+    # 4. Save to Supabase (non-fatal)
     try:
         supabase.table("horoscope_history").insert({
             "user_id":      req.user_id,
@@ -1506,6 +1646,7 @@ async def generate_horoscope(req: HoroscopeRequest):
     return HoroscopeResponse(
         astro_data=astro,
         reading=reading,
+        daily_visual=daily_visual,
         generated_at=now.isoformat(),
     )
 
@@ -1513,8 +1654,8 @@ async def generate_horoscope(req: HoroscopeRequest):
 # ── Diagnostic endpoint ───────────────────────────────────────────────────────
 @app.get("/reading-preview")
 def reading_preview():
-    """Returns a sample deterministic reading using hardcoded test values.
-    Use this to verify the engine works without calling /generate-horoscope."""
+    """Smoke-test endpoint: returns reading + daily_visual for Pushya/Ashtami.
+    Hit this in a browser to verify both engines work without a POST body."""
     test_astro = {
         "tithi_number":    8,
         "tithi_name":      "Ashtami",
@@ -1527,11 +1668,37 @@ def reading_preview():
         "diet_guidance":   "No root vegetables",
         "calculated_at":   datetime.now(timezone.utc).isoformat(),
     }
+    test_reading = generate_deterministic_reading(test_astro, "English")
+    test_visual  = generate_daily_visual(test_astro, test_reading.get("shreni_meter", 5))
+
+    # Verify SVG is well-formed (basic sanity)
+    svg = test_visual.get("svg_code", "")
+    svg_valid = svg.startswith("<svg") and svg.strip().endswith("</svg>")
+
     return {
-        "engine":       "deterministic",
-        "use_ai":       USE_AI,
-        "test_reading": generate_deterministic_reading(test_astro, "English"),
+        "engine":      "deterministic",
+        "use_ai":      USE_AI,
+        "svg_valid":   svg_valid,
+        "reading":     test_reading,
+        "daily_visual": test_visual,
     }
+
+
+# ── Admin: content pipeline review queue ─────────────────────────────────────
+@app.get("/admin/pending-content")
+def view_pending_content():
+    """
+    READ-ONLY view of proposed verses awaiting human approval.
+    Nothing here auto-publishes to users.
+
+    To add a verse to the live library:
+      1. Call content_pipeline.propose_verse() with the candidate text.
+      2. Review here: GET /admin/pending-content.
+      3. If authentic, call content_pipeline.approve_verse(index, verse_key).
+         This writes the entry to verified_verses.json.
+      4. Restart the Render service — load_verified_verses() picks it up.
+    """
+    return {"pending": PENDING_CONTENT, "count": len(PENDING_CONTENT)}
 
 
 # ── Health check ──────────────────────────────────────────────────────────────
